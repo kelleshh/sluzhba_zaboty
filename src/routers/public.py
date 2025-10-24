@@ -92,5 +92,13 @@ async def receive_phone(m: types.Message, state: FSMContext):
 
     #увед в операторский чат
     kb = claim_kb(ticket_id)
-    full = f'Новый клиент #{ticket_id}\nИмя: {m.from_user.first_name}\nUsername: @{m.from_user.username or '-'}\nTG ID: {m.from_user.id}\nТелефон: {phone}' # type: ignore
+    username = f"@{m.from_user.username}" if m.from_user.username else "—" #type: ignore
+    full = (
+        f"Новый клиент #{ticket_id}\n"
+        f"Имя: {m.from_user.first_name or '—'}\n" # type: ignore
+        f"Username: {username}\n"
+        f"TG ID: {m.from_user.id}\n" #type: ignore
+        f"Телефон: {phone}"
+    )
+
     await m.bot.send_message(chat_id=settings.operators_chat_id, text=full, reply_markup = kb) # type: ignore
