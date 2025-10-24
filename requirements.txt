@@ -14,7 +14,7 @@ multidict==6.7.0
 phonenumbers==9.0.17
 propcache==0.4.1
 pydantic==2.11.10
-pydantic-settings==2.11.0
+pydantic-settings==2.6.1
 pydantic_core==2.33.2
 python-dotenv==1.1.1
 SQLAlchemy==2.0.44
