@@ -5,7 +5,15 @@ from aiogram.types import CallbackQuery, Message
 from typing import cast
 
 from src import texts
-from src.keyboards.main  import start_kb, topic_kb, ok_kb, yesno_kb
+from src.keyboards.main import start_kb, topic_kb, ok_kb, yesno_kb
+from src.keyboards.operator import claim_kb
+from src.utils.phone import normalize_phone
+from src.db.base import SessionLocal
+from src.db.models import User, Ticket, TicketStatus
+from src.config import settings
+
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 router = Router()
 
@@ -57,6 +65,32 @@ async def ask_phone(c: CallbackQuery, state: FSMContext):
 
 @router.message(PhoneForm.waiting_phone)
 async def receive_phone(m: types.Message, state: FSMContext):
-    #phone = normalize_phone(m.text or '')
-    #TODO: сделать нормализацию номера телефона в утилитах
-    pass
+    phone = normalize_phone(m.text or '')
+    if not phone:
+        await m.answer(texts.BAD_PHONE)
+        return
+    
+    with SessionLocal() as s:
+        user = s.scalar(select(User).where(User.tg_id == m.from_user.id)) #type: ignore
+        if not user:
+            user = User(tg_id=m.from_user.id, #type: ignore
+                        first_name = m.from_user.first_name, #type: ignore
+                        username = m.from_user.username, #type: ignore
+                        phone = phone) #type: ignore
+            s.add(user)
+        else:
+            user.phone = phone
+        s.flush()
+
+        ticket = Ticket(user_id = user.id, status = TicketStatus.waiting)
+        s.add(ticket)
+        s.commit()
+        ticket_id = ticket.id
+
+    await state.clear()
+    await m.answer(texts.CONNECTING)
+
+    #увед в операторский чат
+    kb = claim_kb(ticket_id)
+    full = f'Новый клиент #{ticket_id}\nИмя: {m.from_user.first_name}\nUsername: @{m.from_user.username or '-'}\nTG ID: {m.from_user.id}\nТелефон: {phone}' # type: ignore
+    await m.bot.send_message(chat_id=settings.operators_chat_id, text=full, reply_markup = kb) # type: ignore
