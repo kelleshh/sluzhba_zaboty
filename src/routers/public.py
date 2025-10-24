@@ -2,6 +2,7 @@ from aiogram import Router, F, types
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
+from aiogram.filters import CommandStart
 from typing import cast
 
 from src import texts
@@ -21,7 +22,7 @@ router = Router()
 class PhoneForm(StatesGroup):
     waiting_phone = State()
 
-@router.message(commands={'start'})
+@router.message(CommandStart)
 async def start(m: types.Message):
     await m.answer(texts.WELCOME, reply_markup=start_kb())
 
