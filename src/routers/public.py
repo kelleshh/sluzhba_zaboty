@@ -22,7 +22,7 @@ router = Router()
 class PhoneForm(StatesGroup):
     waiting_phone = State()
 
-@router.message(CommandStart)
+@router.message(CommandStart())
 async def start(m: types.Message):
     await m.answer(texts.WELCOME, reply_markup=start_kb())
 
