@@ -31,7 +31,7 @@ async def claim_ticket(c: CallbackQuery):
 
 
     @router.callback_query(F.data.startswith('finish:'))
-    async def finis_ticket(c: CallbackQuery):
+    async def finish_ticket(c: CallbackQuery):
         ticket_id = int(c.data.split(':')[1])#type: ignore
         operator_id = c.from_user.id
 
