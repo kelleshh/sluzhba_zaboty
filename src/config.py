@@ -1,4 +1,4 @@
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     bot_token: str
@@ -10,11 +10,10 @@ class Settings(BaseSettings):
     postgres_password: str
     default_region: str = "RU"
 
+    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8')
+
     @property
     def dsn(self) -> str:
         return f"postgresql+psycopg2://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
-
-    class Config:
-        env_file = ".env"
 
 settings = Settings()
