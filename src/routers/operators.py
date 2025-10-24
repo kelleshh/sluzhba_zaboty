@@ -10,7 +10,7 @@ router = Router()
 
 @router.callback_query(F.data.startswith('claim:'))
 async def claim_ticket(c: CallbackQuery):
-    ticket_id = int(c.data.split(':')[1])
+    ticket_id = int(c.data.split(':')[1])#type: ignore
     operator_id = c.from_user.id
 
     with SessionLocal() as s:
@@ -32,7 +32,7 @@ async def claim_ticket(c: CallbackQuery):
 
     @router.callback_query(F.data.startswith('finish:'))
     async def finis_ticket(c: CallbackQuery):
-        ticket_id = int(c.data.split(':')[1])
+        ticket_id = int(c.data.split(':')[1])#type: ignore
         operator_id = c.from_user.id
 
         with SessionLocal() as s:
@@ -48,4 +48,4 @@ async def claim_ticket(c: CallbackQuery):
         await c.bot.send_message(user_tg, OP_DISCONNECTED) #type: ignore
         await c.message.edit_text('Диалог закрыт.') # type:ignore
         await c.answer()
-        
+
