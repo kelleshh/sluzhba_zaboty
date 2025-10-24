@@ -30,22 +30,22 @@ async def claim_ticket(c: CallbackQuery):
     await c.bot.send_message(u.tg_id, OP_CONNECTED) #type: ignore
 
 
-    @router.callback_query(F.data.startswith('finish:'))
-    async def finish_ticket(c: CallbackQuery):
-        ticket_id = int(c.data.split(':')[1])#type: ignore
-        operator_id = c.from_user.id
+@router.callback_query(F.data.startswith('finish:'))
+async def finish_ticket(c: CallbackQuery):
+    ticket_id = int(c.data.split(':')[1])#type: ignore
+    operator_id = c.from_user.id
 
-        with SessionLocal() as s:
-            t = s.get(Ticket, ticket_id)
-            if not t or t.operator_tg_id != operator_id:
-                await c.answer('Это не ваш диалог', show_alert=True)
-                return
-            t.status = TicketStatus.closed
-            t.closed_at = datetime.now()
-            s.commit()
-            user_tg = t.user.tg_id
+    with SessionLocal() as s:
+        t = s.get(Ticket, ticket_id)
+        if not t or t.operator_tg_id != operator_id:
+            await c.answer('Это не ваш диалог', show_alert=True)
+            return
+        t.status = TicketStatus.closed
+        t.closed_at = datetime.now()
+        s.commit()
+        user_tg = t.user.tg_id
 
-        await c.bot.send_message(user_tg, OP_DISCONNECTED) #type: ignore
-        await c.message.edit_text('Диалог закрыт.') # type:ignore
-        await c.answer()
+    await c.bot.send_message(user_tg, OP_DISCONNECTED) #type: ignore
+    await c.message.edit_text('Диалог закрыт.') # type:ignore
+    await c.answer()
 
