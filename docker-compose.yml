@@ -29,6 +29,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       DEFAULT_REGION: ${DEFAULT_REGION:-RU}
+    volumes:
+      - ./media:/app/media
     # еслискормить весь .env целиком
     # env_file:
     #   - .env
