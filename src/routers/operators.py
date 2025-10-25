@@ -3,6 +3,7 @@ from aiogram.types import CallbackQuery
 from src.db.base import SessionLocal
 from src.db.models import Ticket, TicketStatus, User
 from src.keyboards.operator import finish_kb
+from src.keyboards.main import ok_kb
 from src.texts import OP_CONNECTED, OP_DISCONNECTED
 from datetime import datetime, timezone
 
@@ -48,7 +49,7 @@ async def finish_ticket(c: CallbackQuery):
         s.commit()
         user_tg = t.user.tg_id
 
-    await c.bot.send_message(user_tg, OP_DISCONNECTED) #type: ignore
+    await c.bot.send_message(user_tg, OP_DISCONNECTED, reply_markup=ok_kb()) #type: ignore
     await c.message.edit_text('Диалог закрыт.') # type:ignore
     await c.answer()
 
