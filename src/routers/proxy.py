@@ -1,25 +1,122 @@
 from aiogram import Router, types, F
 from src.db.base import SessionLocal
-from src.db.models import Ticket, TicketStatus, TicketMessage, User
+from src.db.models import Ticket, TicketStatus, TicketMessage, User, MessageAttachment
+from src.utils.files import download_by_file_id, build_rel_path
 from sqlalchemy import select
+from src.config import settings
 
 router = Router()
+
+async def _attach_photo(bot, s, ticket_id: int, tm_id: int, m: types.Message):
+    ph = m.photo[-1]
+    att = MessageAttachment(
+        ticket_message_id=tm_id,
+        media_type="photo",
+        file_id=ph.file_id,
+        file_unique_id=ph.file_unique_id,
+        size=getattr(ph, "file_size", None),
+        width=ph.width,
+        height=ph.height,
+    )
+    if settings.store_media_local:
+        rel = build_rel_path(ticket_id, tm_id, "photo", ph.file_unique_id, None)
+        att.local_path = await download_by_file_id(bot, ph.file_id, rel)
+    s.add(att)
+
+async def _attach_document(bot, s, ticket_id: int, tm_id: int, m: types.Message):
+    d = m.document
+    att = MessageAttachment(
+        ticket_message_id=tm_id,
+        media_type="document",
+        file_id=d.file_id,
+        file_unique_id=d.file_unique_id,
+        size=getattr(d, "file_size", None),
+        mime_type=getattr(d, "mime_type", None),
+        file_name=getattr(d, "file_name", None),
+    )
+    if settings.store_media_local:
+        rel = build_rel_path(ticket_id, tm_id, "document", d.file_unique_id, getattr(d, "mime_type", None))
+        att.local_path = await download_by_file_id(bot, d.file_id, rel)
+    s.add(att)
+
+async def _attach_video(bot, s, ticket_id: int, tm_id: int, m: types.Message):
+    v = m.video
+    att = MessageAttachment(
+        ticket_message_id=tm_id,
+        media_type="video",
+        file_id=v.file_id,
+        file_unique_id=v.file_unique_id,
+        size=getattr(v, "file_size", None),
+        width=getattr(v, "width", None),
+        height=getattr(v, "height", None),
+        duration=getattr(v, "duration", None),
+        mime_type=getattr(v, "mime_type", None),
+    )
+    if settings.store_media_local:
+        rel = build_rel_path(ticket_id, tm_id, "video", v.file_unique_id, getattr(v, "mime_type", None))
+        att.local_path = await download_by_file_id(bot, v.file_id, rel)
+    s.add(att)
+
+async def _attach_voice(bot, s, ticket_id: int, tm_id: int, m: types.Message):
+    v = m.voice
+    att = MessageAttachment(
+        ticket_message_id=tm_id,
+        media_type="voice",
+        file_id=v.file_id,
+        file_unique_id=v.file_unique_id,
+        size=getattr(v, "file_size", None),
+        duration=getattr(v, "duration", None),
+        mime_type=getattr(v, "mime_type", None),
+    )
+    if settings.store_media_local:
+        rel = build_rel_path(ticket_id, tm_id, "voice", v.file_unique_id, getattr(v, "mime_type", None))
+        att.local_path = await download_by_file_id(bot, v.file_id, rel)
+    s.add(att)
+
+
+
+async def _log_message(bot, s, ticket_id: int, m: types.Message, sender_type: str):
+    content_type = m.content_type
+    tm = TicketMessage(
+        ticket_id=ticket_id,
+        sender_tg_id=m.from_user.id,      # type: ignore
+        sender_type=sender_type,
+        tg_message_id=m.message_id,
+        content_type=content_type,
+        message_text=m.text if content_type == "text" else None,
+        caption=getattr(m, "caption", None),
+    )
+    s.add(tm)
+    s.flush()  # получим tm.id
+
+    try:
+        if content_type == "photo" and m.photo:
+            await _attach_photo(bot, s, ticket_id, tm.id, m)
+        elif content_type == "document" and m.document:
+            await _attach_document(bot, s, ticket_id, tm.id, m)
+        elif content_type == "video" and m.video:
+            await _attach_video(bot, s, ticket_id, tm.id, m)
+        elif content_type == "voice" and m.voice:
+            await _attach_voice(bot, s, ticket_id, tm.id, m)
+        # при желании добавь audio / animation / video_note / sticker
+    except Exception:
+        pass
+
+    s.commit()
+
 
 # Пользователь -> Оператор (когда тикет ASSIGNED)
 @router.message(F.chat.type == "private")
 async def user_to_operator(m: types.Message):
     with SessionLocal() as s:
-        user = s.scalar(select(User).where(User.tg_id == m.from_user.id)) #type: ignore
+        user = s.scalar(select(User).where(User.tg_id == m.from_user.id))  # type: ignore
         if not user:
             return
-        t = s.scalar(select(Ticket).where(Ticket.user_id==user.id, Ticket.status==TicketStatus.assigned))
+        t = s.scalar(select(Ticket).where(Ticket.user_id == user.id, Ticket.status == TicketStatus.assigned))
         if not t:
             return
-        # пересылаем оператору
-        sent = await m.bot.copy_message(chat_id=t.operator_tg_id, from_chat_id=m.chat.id, message_id=m.message_id) #type: ignore
-        s.add(TicketMessage(ticket_id=t.id, sender_tg_id=m.from_user.id, sender_type="user",#type: ignore
-                            tg_message_id=m.message_id, content_type=m.content_type))
-        s.commit()
+        await m.bot.copy_message(chat_id=t.operator_tg_id, from_chat_id=m.chat.id, message_id=m.message_id)  # type: ignore
+        await _log_message(m.bot, s, t.id, m, sender_type="user")  # type: ignore
 
 # Оператор -> Пользователь (только если он владелец тикета)
 @router.message(F.chat.type == "private", F.from_user.is_bot == False)
@@ -30,7 +127,5 @@ async def operator_to_user(m: types.Message):
         if not t:
             return
         user_tg = t.user.tg_id
-        sent = await m.bot.copy_message(chat_id=user_tg, from_chat_id=m.chat.id, message_id=m.message_id)#type: ignore
-        s.add(TicketMessage(ticket_id=t.id, sender_tg_id=m.from_user.id, sender_type="operator",#type: ignore
-                            tg_message_id=m.message_id, content_type=m.content_type))
-        s.commit()
+        await m.bot.copy_message(chat_id=t.user.tg_id, from_chat_id=m.chat.id, message_id=m.message_id)  # type: ignore
+        await _log_message(m.bot, s, t.id, m, sender_type="operator")  # type: ignore
