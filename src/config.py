@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     postgres_user: str
     postgres_password: str
     default_region: str = "RU"
+    media_root: str = "media"
+    store_media_local: bool = True 
+
 
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8')
 
