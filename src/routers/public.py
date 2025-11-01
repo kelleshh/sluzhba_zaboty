@@ -1,105 +1,353 @@
-from aiogram import Router, F, types
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
-from aiogram.filters import CommandStart
 from typing import cast
 
-from src import texts
-from src.keyboards.main import start_kb, topic_kb, ok_kb, yesno_kb
-from src.keyboards.operator import claim_kb
-from src.utils.phone import normalize_phone
-from src.db.base import SessionLocal
-from src.db.models import User, Ticket, TicketStatus
-from src.config import settings
+from aiogram import Router, F, types
+from aiogram.types import CallbackQuery, Message
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
+from aiogram.filters import CommandStart
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+
+from src import texts
+from src.keyboards.main import (
+    main_menu_kb,
+    return_kb,
+    other_menu_kb,
+    ok_kb,
+)
+from src.keyboards.operator import claim_kb
+from src.db.base import SessionLocal
+from src.db.models import User, Ticket, TicketStatus, TicketMessage
+from src.config import settings
 
 router = Router()
 
-# ожидание телефона 
-class PhoneForm(StatesGroup):
-    waiting_phone = State()
 
-@router.message(CommandStart())
-async def start(m: types.Message):
-    await m.answer(texts.WELCOME, reply_markup=start_kb())
+# -------------------------
+# FSM СЦЕНАРИИ
+# -------------------------
 
-@router.callback_query(F.data == 'to_start')
-async def to_start(c: CallbackQuery):
-    message = cast(Message, c.message)
-    await message.edit_text(texts.WELCOME, reply_markup=start_kb())
-    await c.answer()
+class WarrantyForm(StatesGroup):
+    waiting_details = State()   # ждем текст с описанием проблемы и где купили
+    waiting_media = State()     # ждем фото/видео/чек
 
-@router.callback_query(F.data == 'topic_warranty')
-async def warranty(c: CallbackQuery):
-    message = cast(Message, c.message)
-    await message.edit_text(texts.WARRANTY, reply_markup=topic_kb())
-    await c.answer()
+class OtherForm(StatesGroup):
+    waiting_question = State()  # ждем текст вопроса для "Другой вопрос"
 
 
-@router.callback_query(F.data == 'topic_refund')
-async def refund(c: CallbackQuery):
-    message = cast(Message, c.message)
-    await message.edit_text(texts.REFUND, reply_markup=topic_kb())
-    await c.answer()
+# -------------------------
+# УТИЛИТЫ
+# -------------------------
 
-@router.callback_query(F.data == 'ok')
-async def ok_thanks(c: CallbackQuery):
-    message = cast(Message, c.message)
-    await message.edit_text(texts.THANKS, reply_markup=ok_kb())
-    await c.answer()
-
-@router.callback_query(F.data == 'topic_other')
-async def other(c: CallbackQuery):
-    message = cast(Message, c.message)
-    await message.edit_text(texts.ASK_OPERATOR, reply_markup=yesno_kb())
-    await c.answer()
-
-@router.callback_query(F.data == 'to_operator')
-async def ask_phone(c: CallbackQuery, state: FSMContext):
-    message = cast(Message, c.message)
-    await message.edit_text(texts.ASK_PHONE)
-    await state.set_state(PhoneForm.waiting_phone)
-    await c.answer()
-
-@router.message(PhoneForm.waiting_phone)
-async def receive_phone(m: types.Message, state: FSMContext):
-    phone = normalize_phone(m.text or '')
-    if not phone:
-        await m.answer(texts.BAD_PHONE)
-        return
-    
+def _upsert_user_and_create_ticket(m: types.Message) -> tuple[int, User]:
+    """
+    Создает (или обновляет) пользователя, создает тикет WAITING.
+    Возвращает (ticket_id, user_obj).
+    """
     with SessionLocal() as s:
-        user = s.scalar(select(User).where(User.tg_id == m.from_user.id)) #type: ignore
+        user = s.scalar(select(User).where(User.tg_id == m.from_user.id))  # type: ignore
         if not user:
-            user = User(tg_id=m.from_user.id, #type: ignore
-                        first_name = m.from_user.first_name, #type: ignore
-                        username = m.from_user.username, #type: ignore
-                        phone = phone) #type: ignore
+            user = User(
+                tg_id=m.from_user.id,              # type: ignore
+                first_name=m.from_user.first_name, # type: ignore
+                username=m.from_user.username,     # type: ignore
+                phone=None,
+            )
             s.add(user)
+            s.flush()
         else:
-            user.phone = phone
-        s.flush()
+            pass
 
-        ticket = Ticket(user_id = user.id, status = TicketStatus.waiting)
+        ticket = Ticket(
+            user_id=user.id,
+            status=TicketStatus.waiting,
+            operator_tg_id=None,
+        )
         s.add(ticket)
         s.commit()
         ticket_id = ticket.id
 
-    await state.clear()
-    await m.answer(texts.CONNECTING)
+    return ticket_id, user
 
-    #увед в операторский чат
-    kb = claim_kb(ticket_id)
-    username = f"@{m.from_user.username}" if m.from_user.username else "—" #type: ignore
-    full = (
-        f"Новый клиент #{ticket_id}\n"
-        f"Имя: {m.from_user.first_name or '—'}\n" # type: ignore
-        f"Username: {username}\n"
-        f"TG ID: {m.from_user.id}\n" #type: ignore
-        f"Телефон: {phone}"
+
+def _save_ticket_message(
+    s,
+    ticket_id: int,
+    m: types.Message,
+    sender_type: str,
+):
+    """
+    Сохраняет одно сообщение пользователя/оператора в ticket_messages.
+    Мы пишем content_type, текст и caption.
+    """
+    tm = TicketMessage(
+        ticket_id=ticket_id,
+        sender_tg_id=m.from_user.id,  # type: ignore
+        sender_type=sender_type,
+        tg_message_id=m.message_id,
+        content_type=m.content_type,
+        message_text=getattr(m, "text", None),
+        caption=getattr(m, "caption", None),
+    )
+    s.add(tm)
+    s.flush()
+    # attachments / files мы можем обрабатывать отдельно,
+    # но для базового MVP не обязательно
+
+
+async def _notify_operators_about_ticket(
+    m: types.Message,
+    ticket_id: int,
+    user: User,
+    intro_text: str,
+    extra_message_ids: list[int],
+):
+    """
+    Отправляем в операторский чат сводку-заявку + кнопка "Взять в работу",
+    потом пересылаем сами сообщения клиента (описание, вложения и т.д.).
+    """
+    username = f"@{user.username}" if user.username else "—"
+    summary = (
+        f"{intro_text} #{ticket_id}\n"
+        f"Пользователь: {user.first_name or '—'} {username}\n"
+        f"TG ID: {user.tg_id}\n"
+        f"Статус: WAITING\n\n"
+        f"Ниже — детали обращения."
     )
 
-    await m.bot.send_message(chat_id=settings.operators_chat_id, text=full, reply_markup = kb) # type: ignore
+    # шлем карточку с кнопкой "Взять в работу"
+    await m.bot.send_message(
+        chat_id=settings.operators_chat_id,
+        text=summary,
+        reply_markup=claim_kb(ticket_id),
+    )
+
+    # пересылаем сообщения юзера (описание/документы/медиа)
+    for mid in extra_message_ids:
+        await m.bot.copy_message(
+            chat_id=settings.operators_chat_id,
+            from_chat_id=m.chat.id,
+            message_id=mid,
+        )
+
+
+def _message_has_media(m: types.Message) -> bool:
+    """
+    Проверяем, что пользователь реально отправил медиа:
+    фото / документ / видео / войс / аудио / анимация / видео-ноту.
+    """
+    return any([
+        getattr(m, "photo", None),
+        getattr(m, "document", None),
+        getattr(m, "video", None),
+        getattr(m, "voice", None),
+        getattr(m, "audio", None),
+        getattr(m, "animation", None),
+        getattr(m, "video_note", None),
+    ])
+
+
+# -------------------------
+# /start + главное меню
+# -------------------------
+
+@router.message(CommandStart())
+async def cmd_start(m: types.Message, state: FSMContext):
+    # чистим любые зависшие состояния
+    await state.clear()
+    await m.answer(texts.WELCOME, reply_markup=main_menu_kb())
+
+
+@router.callback_query(F.data == "to_start")
+async def to_start(c: CallbackQuery, state: FSMContext):
+    # возврат в главное меню
+    await state.clear()
+    message = cast(Message, c.message)
+    await message.edit_text(texts.WELCOME, reply_markup=main_menu_kb())
+    await c.answer()
+
+
+# -------------------------
+# 1. ОБРАЩЕНИЕ ПО ГАРАНТИИ
+# -------------------------
+
+@router.callback_query(F.data == "warranty_start")
+async def warranty_start(c: CallbackQuery, state: FSMContext):
+    """
+    Пользователь выбрал "Обращение по гарантии".
+    Шаг 1: просим описать проблему и где покупал.
+    """
+    await state.clear()
+    await state.set_state(WarrantyForm.waiting_details)
+
+    message = cast(Message, c.message)
+    await message.edit_text(texts.WARRANTY_INTRO)
+    await c.answer()
+
+
+@router.message(WarrantyForm.waiting_details)
+async def warranty_got_details(m: types.Message, state: FSMContext):
+    """
+    Пользователь написал текст с описанием проблемы.
+    Теперь просим приложить фото/видео/чек.
+    """
+    # сохраняем первое сообщение во временное состояние
+    await state.update_data(
+        first_msg_id=m.message_id,
+        first_msg_text=getattr(m, "text", None),
+        first_msg_caption=getattr(m, "caption", None),
+        first_msg_content_type=m.content_type,
+    )
+
+    await state.set_state(WarrantyForm.waiting_media)
+    await m.answer(texts.WARRANTY_NEED_MEDIA)
+
+
+@router.message(WarrantyForm.waiting_media)
+async def warranty_got_media(m: types.Message, state: FSMContext):
+    """
+    Пользователь шлет медиа (фото/чек/видео).
+    Если медиа нет — повторно просим.
+    Если есть — создаем тикет, пишем в БД, уведомляем операторов,
+    отвечаем пользователю.
+    """
+    if not _message_has_media(m):
+        # нет реальных вложений, повторяем просьбу
+        await m.answer(texts.WARRANTY_NEED_MEDIA)
+        return
+
+    data = await state.get_data()
+
+    # создаем/находим user + создаем тикет WAITING
+    ticket_id, user = _upsert_user_and_create_ticket(m)
+
+    # записываем оба сообщения (описание и вложения) в ticket_messages
+    with SessionLocal() as s:
+        # первое сообщение (описание)
+        tm1 = TicketMessage(
+            ticket_id=ticket_id,
+            sender_tg_id=m.from_user.id,  # type: ignore
+            sender_type="user",
+            tg_message_id=data["first_msg_id"],
+            content_type=data["first_msg_content_type"],
+            message_text=data["first_msg_text"],
+            caption=data["first_msg_caption"],
+        )
+        s.add(tm1)
+
+        # второе сообщение (медиа)
+        _save_ticket_message(s, ticket_id, m, sender_type="user")
+
+        s.commit()
+
+    # уведомляем операторов
+    await _notify_operators_about_ticket(
+        m=m,
+        ticket_id=ticket_id,
+        user=user,
+        intro_text="Новое обращение по гарантии",
+        extra_message_ids=[data["first_msg_id"], m.message_id],
+    )
+
+    # отвечаем пользователю + кнопка "В начало"
+    await m.answer(texts.WARRANTY_THANKS, reply_markup=ok_kb())
+
+    # выходим из стейта
+    await state.clear()
+
+
+# -------------------------
+# 2. ВОЗВРАТ ТОВАРА
+# -------------------------
+
+@router.callback_query(F.data == "return_start")
+async def return_start(c: CallbackQuery, state: FSMContext):
+    """
+    Показываем инфу про возврат (2 сообщения),
+    потом задаем вопрос "Хотите перейти в гарантию?"
+    с клавиатурой return_kb().
+    """
+    await state.clear()
+
+    # редактируем исходное сообщение, потом досылаем второе и третье
+    message = cast(Message, c.message)
+    await message.edit_text(texts.RETURN_NOTICE_1)
+
+    # второе сообщение
+    await c.message.answer(texts.RETURN_NOTICE_2)
+
+    # третье сообщение с клавиатурой
+    await c.message.answer(texts.RETURN_ASK, reply_markup=return_kb())
+
+    await c.answer()
+
+
+# -------------------------
+# 3. ДРУГОЙ ВОПРОС
+# -------------------------
+
+@router.callback_query(F.data == "other_start")
+async def other_start(c: CallbackQuery, state: FSMContext):
+    """
+    Раздел 'Другой вопрос': показываем два инфо-сообщения,
+    потом клавиатуру: Отправить / Вернуться в меню.
+    """
+    await state.clear()
+
+    message = cast(Message, c.message)
+    # редактируем кнопочное сообщение
+    await message.edit_text(texts.OTHER_INTRO_1)
+
+    # второе сообщение
+    await c.message.answer(texts.OTHER_INTRO_2)
+
+    # третье сообщение с клавиатурой
+    await c.message.answer(texts.OTHER_ASK_SEND, reply_markup=other_menu_kb())
+
+    await c.message.delete()
+
+    await c.answer()
+
+
+@router.callback_query(F.data == "other_send")
+async def other_send(c: CallbackQuery, state: FSMContext):
+    """
+    Пользователь нажал "Отправить сообщение сотруднику".
+    Мы просим его написать вопрос следующим сообщением.
+    """
+    await state.set_state(OtherForm.waiting_question)
+
+    await c.message.answer(texts.OTHER_PLEASE_DESCRIBE)
+    await c.message.delete()
+    await c.answer()
+
+
+@router.message(OtherForm.waiting_question)
+async def other_waiting_question(m: types.Message, state: FSMContext):
+    """
+    Пользователь прислал вопрос (любой контент).
+    Создаем тикет WAITING, логируем сообщение,
+    отправляем оператору карточку с claim-кнопкой,
+    и говорим пользователю "ваш запрос передан".
+    """
+    # создаем тикет
+    ticket_id, user = _upsert_user_and_create_ticket(m)
+
+    # сохраняем сообщение в ticket_messages
+    with SessionLocal() as s:
+        _save_ticket_message(s, ticket_id, m, sender_type="user")
+        s.commit()
+
+    # уведомляем операторов:
+    await _notify_operators_about_ticket(
+        m=m,
+        ticket_id=ticket_id,
+        user=user,
+        intro_text="Новый вопрос от клиента",
+        extra_message_ids=[m.message_id],
+    )
+
+    # отвечаем пользователю и даем кнопку "В начало"
+    await m.answer(texts.OTHER_AFTER_SEND, reply_markup=ok_kb())
+
+    await state.clear()

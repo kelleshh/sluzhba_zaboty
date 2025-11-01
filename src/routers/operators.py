@@ -1,17 +1,20 @@
-from aiogram import Router, F, types
+from datetime import datetime, timezone
+
+from aiogram import Router, F
 from aiogram.types import CallbackQuery
+
 from src.db.base import SessionLocal
 from src.db.models import Ticket, TicketStatus, User
 from src.keyboards.operator import finish_kb
 from src.keyboards.main import ok_kb
 from src.texts import OP_CONNECTED, OP_DISCONNECTED
-from datetime import datetime, timezone
 
 router = Router()
 
+
 @router.callback_query(F.data.startswith('claim:'))
 async def claim_ticket(c: CallbackQuery):
-    ticket_id = int(c.data.split(':')[1])#type: ignore
+    ticket_id = int(c.data.split(':')[1])  # type: ignore
     operator_id = c.from_user.id
 
     with SessionLocal() as s:
@@ -19,24 +22,31 @@ async def claim_ticket(c: CallbackQuery):
         if not t or t.status != TicketStatus.waiting:
             await c.answer('Уже занято или неактуально', show_alert=True)
             return
+
         t.status = TicketStatus.assigned
         t.operator_tg_id = operator_id
         s.commit()
+
         u = s.get(User, t.user_id)
 
-        username = f'@{u.username}' if getattr(u, 'username', None) else '-' # type: ignore
-        first = u.first_name or '-' # type: ignore
-    
-    # сообщение оператору
-    msg = f'Вы взяли тикет #{ticket_id} (пользователь {first}, {username}, айди @{u.username}. \n Ведите переписку тут - бот все перекинет пользователю.)' # type: ignore
-    await c.bot.send_message(operator_id, msg, reply_markup=finish_kb(ticket_id)) # type: ignore
+    username = f"@{u.username}" if getattr(u, "username", None) else "—"
+    first = u.first_name or "—"
+    msg = (
+        f"Вы взяли тикет #{ticket_id} (пользователь {first}, {username}).\n"
+        f"Пишите ответы тут — бот всё перекинет пользователю."
+    )
+
+    # оператору в личку
+    await c.bot.send_message(operator_id, msg, reply_markup=finish_kb(ticket_id))  # type: ignore
     await c.answer('Тикет закреплен за вами')
-    await c.bot.send_message(u.tg_id, OP_CONNECTED) #type: ignore
+
+    # пользователю: оператор подключился
+    await c.bot.send_message(u.tg_id, OP_CONNECTED)  # type: ignore
 
 
 @router.callback_query(F.data.startswith('finish:'))
 async def finish_ticket(c: CallbackQuery):
-    ticket_id = int(c.data.split(':')[1])#type: ignore
+    ticket_id = int(c.data.split(':')[1])  # type: ignore
     operator_id = c.from_user.id
 
     with SessionLocal() as s:
@@ -49,7 +59,13 @@ async def finish_ticket(c: CallbackQuery):
         s.commit()
         user_tg = t.user.tg_id
 
-    await c.bot.send_message(user_tg, OP_DISCONNECTED, reply_markup=ok_kb()) #type: ignore
-    await c.message.edit_text('Диалог закрыт.') # type:ignore
+    # говорим юзеру, что оператор отключился + даём кнопку "В начало"
+    await c.bot.send_message(user_tg, OP_DISCONNECTED, reply_markup=ok_kb())  # type: ignore
+
+    # редактируем у оператора кнопку "Завершить диалог"
+    if c.message:
+        await c.message.edit_text('Диалог закрыт.')
+
     await c.answer()
+
 
