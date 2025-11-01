@@ -1,4 +1,5 @@
 from typing import cast
+import time
 
 from aiogram import Router, F, types
 from aiogram.types import CallbackQuery, Message
@@ -7,6 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.filters import CommandStart
 
 from sqlalchemy import select
+from pathlib import Path
 
 from src import texts
 from src.keyboards.main import (
@@ -19,6 +21,7 @@ from src.keyboards.operator import claim_kb
 from src.db.base import SessionLocal
 from src.db.models import User, Ticket, TicketStatus, TicketMessage
 from src.config import settings
+from src.utils.files import download_by_file_id
 
 router = Router()
 
@@ -206,24 +209,57 @@ async def warranty_got_details(m: types.Message, state: FSMContext):
 @router.message(WarrantyForm.waiting_media)
 async def warranty_got_media(m: types.Message, state: FSMContext):
     """
-    Пользователь шлет медиа (фото/чек/видео).
-    Если медиа нет — повторно просим.
-    Если есть — создаем тикет, пишем в БД, уведомляем операторов,
-    отвечаем пользователю.
+    Пользователь шлет медиа (фото/видео/чек).
+    Если медиа нет — просим повторить.
+    Если есть — создаем тикет, сохраняем медиа в media/, логируем,
+    уведомляем операторов, благодарим пользователя.
     """
+    # 1. проверяем, что реально есть вложение
     if not _message_has_media(m):
-        # нет реальных вложений, повторяем просьбу
         await m.answer(texts.WARRANTY_NEED_MEDIA)
         return
 
+    # 2. достаём то, что он писал на шаге 1
     data = await state.get_data()
 
-    # создаем/находим user + создаем тикет WAITING
+    # 3. создаём/берём юзера и тикет в статусе WAITING
     ticket_id, user = _upsert_user_and_create_ticket(m)
 
-    # записываем оба сообщения (описание и вложения) в ticket_messages
+    # 4. вытаскиваем file_id из присланного сообщения
+    file_id = None
+    if getattr(m, "photo", None):
+        file_id = m.photo[-1].file_id          # самое большое фото
+    elif getattr(m, "document", None):
+        file_id = m.document.file_id
+    elif getattr(m, "video", None):
+        file_id = m.video.file_id
+    elif getattr(m, "voice", None):
+        file_id = m.voice.file_id
+    elif getattr(m, "audio", None):
+        file_id = m.audio.file_id
+    elif getattr(m, "animation", None):
+        file_id = m.animation.file_id
+    elif getattr(m, "video_note", None):
+        file_id = m.video_note.file_id
+
+    # 5. если есть file_id, скачиваем файл в media/ticket_<id>/
+    if file_id:
+        ts = int(time.time())
+        base_dir = Path("media") / f"ticket_{ticket_id}"
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        local_path = base_dir / f"{ts}_{m.message_id}"
+        # сохраняем файл локально
+        await download_by_file_id(m.bot, file_id, str(local_path))
+
+        # сейчас мы путь к файлу в БД не пишем, потому что у TicketMessage нет поля file_path.
+        # если захочешь хранить путь в базе — добавим колонку и будем писать.
+
+    # 6. пишем в базу оба сообщения:
+    #    - первое сообщение (текстовая жалоба с шага 1),
+    #    - второе сообщение (медиа с этого шага)
     with SessionLocal() as s:
-        # первое сообщение (описание)
+        # первое сообщение (описание проблемы)
         tm1 = TicketMessage(
             ticket_id=ticket_id,
             sender_tg_id=m.from_user.id,  # type: ignore
@@ -235,12 +271,12 @@ async def warranty_got_media(m: types.Message, state: FSMContext):
         )
         s.add(tm1)
 
-        # второе сообщение (медиа)
+        # второе сообщение (медиа и/или подпись к нему)
         _save_ticket_message(s, ticket_id, m, sender_type="user")
 
         s.commit()
 
-    # уведомляем операторов
+    # 7. уведомляем операторов (карточка + пересылка оригинальных сообщений)
     await _notify_operators_about_ticket(
         m=m,
         ticket_id=ticket_id,
@@ -249,11 +285,12 @@ async def warranty_got_media(m: types.Message, state: FSMContext):
         extra_message_ids=[data["first_msg_id"], m.message_id],
     )
 
-    # отвечаем пользователю + кнопка "В начало"
+    # 8. отвечаем пользователю + кнопка "В начало"
     await m.answer(texts.WARRANTY_THANKS, reply_markup=ok_kb())
 
-    # выходим из стейта
+    # 9. чистим FSM
     await state.clear()
+
 
 
 # -------------------------
