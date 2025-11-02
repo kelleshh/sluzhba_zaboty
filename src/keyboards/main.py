@@ -42,3 +42,29 @@ def ok_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="В начало", callback_data="to_start")],
     ])
+
+
+
+def warranty_media_done_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="Отправить оператору ✅",
+            callback_data="warranty_done"
+        )],
+        [InlineKeyboardButton(
+            text="В начало",
+            callback_data="to_start"
+        )],
+    ])
+
+def other_media_done_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="Отправить оператору ✅",
+            callback_data="other_done"
+        )],
+        [InlineKeyboardButton(
+            text="В начало",
+            callback_data="to_start"
+        )],
+    ])
