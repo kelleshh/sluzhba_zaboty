@@ -341,7 +341,6 @@ async def other_start(c: CallbackQuery, state: FSMContext):
     # третье сообщение с клавиатурой
     await c.message.answer(texts.OTHER_ASK_SEND, reply_markup=other_menu_kb())
 
-    await c.message.delete()
 
     await c.answer()
 
@@ -355,7 +354,6 @@ async def other_send(c: CallbackQuery, state: FSMContext):
     await state.set_state(OtherForm.waiting_question)
 
     await c.message.answer(texts.OTHER_PLEASE_DESCRIBE)
-    await c.message.delete()
     await c.answer()
 
 
