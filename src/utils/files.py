@@ -102,7 +102,7 @@ def _collect_attachments(m: types.Message) -> list[dict]:
 
     return out
 
-
+# ОНА ПОКА НЕ НУЖНА, НО ПУСТЬ ЛЕЖИТ
 async def save_all_attachments_from_message(bot: Bot, m: types.Message, ticket_id: int) -> list[str]:
     """
     "Новая" логика, которой пользуется public.py.
