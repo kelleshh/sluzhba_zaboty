@@ -1,5 +1,4 @@
 from typing import cast
-import time
 
 from aiogram import Router, F, types
 from aiogram.types import CallbackQuery, Message
@@ -8,7 +7,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.filters import CommandStart
 
 from sqlalchemy import select
-from pathlib import Path
 
 from src import texts
 from src.keyboards.main import (
@@ -16,12 +14,14 @@ from src.keyboards.main import (
     return_kb,
     other_menu_kb,
     ok_kb,
+    other_media_done_kb,
+    warranty_media_done_kb,
 )
 from src.keyboards.operator import claim_kb
 from src.db.base import SessionLocal
 from src.db.models import User, Ticket, TicketStatus, TicketMessage
 from src.config import settings
-from src.utils.files import download_by_file_id
+from src.utils.files import save_all_attachments_from_message
 
 router = Router()
 
@@ -35,7 +35,8 @@ class WarrantyForm(StatesGroup):
     waiting_media = State()     # ждем фото/видео/чек
 
 class OtherForm(StatesGroup):
-    waiting_question = State()  # ждем текст вопроса для "Другой вопрос"
+    waiting_question_text = State()  # ждем текст вопроса
+    waiting_question_media = State() # ждем доп. вложения
 
 
 # -------------------------
@@ -177,120 +178,149 @@ async def to_start(c: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "warranty_start")
 async def warranty_start(c: CallbackQuery, state: FSMContext):
     """
-    Пользователь выбрал "Обращение по гарантии".
-    Шаг 1: просим описать проблему и где покупал.
+    Пользователь выбрал 'Обращение по гарантии'.
+    Даём инструкцию: опиши проблему и где куплено.
+    Вешаем состояние waiting_details.
+    Кладём кнопку 'В начало'.
     """
     await state.clear()
     await state.set_state(WarrantyForm.waiting_details)
 
     message = cast(Message, c.message)
-    await message.edit_text(texts.WARRANTY_INTRO)
+    await message.edit_text(
+        texts.WARRANTY_INTRO,
+        reply_markup=ok_kb()  # 'В начало'
+    )
     await c.answer()
 
 
 @router.message(WarrantyForm.waiting_details)
-async def warranty_got_details(m: types.Message, state: FSMContext):
+async def warranty_details_step(m: types.Message, state: FSMContext):
     """
-    Пользователь написал текст с описанием проблемы.
-    Теперь просим приложить фото/видео/чек.
+    Это ПЕРВОЕ сообщение по гарантии.
+    Здесь мы:
+    - создаём тикет (если его ещё нет)
+    - сохраняем это сообщение в базу
+    - сохраняем вложения этого сообщения (если юзер уже скинул фотки сразу)
+    - переключаемся в waiting_media
+    - говорим пользователю 'теперь докинь фото/видео/чек и нажми кнопку'
     """
-    # сохраняем первое сообщение во временное состояние
-    await state.update_data(
-        first_msg_id=m.message_id,
-        first_msg_text=getattr(m, "text", None),
-        first_msg_caption=getattr(m, "caption", None),
-        first_msg_content_type=m.content_type,
+
+    data = await state.get_data()
+    if data.get("ticket_id") is not None:
+        # Если по гонке пришло ещё одно сообщение сюда до переключения стейта,
+        # то просто обрабатываем его как media-дополнение.
+        return await warranty_collect_media(m, state)
+
+    # 1. создаём тикет WAITING
+    ticket_id, user = _upsert_user_and_create_ticket(m)
+
+    # 2. сохранить вложения из этого сообщения на диск (фото, доки и т.д.)
+    await save_all_attachments_from_message(
+        bot=m.bot,
+        m=m,
+        ticket_id=ticket_id,
     )
 
+    # 3. залогировать это сообщение в ticket_messages
+    with SessionLocal() as s:
+        _save_ticket_message(s, ticket_id, m, sender_type="user")
+        s.commit()
+
+    # 4. сохранить в FSM:
+    #    - ticket_id для этого обращения
+    #    - собранные message_id (начинаем список с этого первого сообщения)
+    await state.update_data(
+        ticket_id=ticket_id,
+        user_tg_id=m.from_user.id,       # type: ignore
+        collected_msg_ids=[m.message_id],
+    )
+
+    # 5. перейти в стадию ожидания медиа
     await state.set_state(WarrantyForm.waiting_media)
-    await m.answer(texts.WARRANTY_NEED_MEDIA)
+
+    # 6. попросить загрузить медиа и дать кнопку "Отправить оператору ✅"
+    await m.answer(
+        texts.WARRANTY_MEDIA_STEP,
+        reply_markup=warranty_media_done_kb()
+    )
+
 
 
 @router.message(WarrantyForm.waiting_media)
-async def warranty_got_media(m: types.Message, state: FSMContext):
+async def warranty_collect_media(m: types.Message, state: FSMContext):
     """
-    Пользователь шлет медиа (фото/видео/чек).
-    Если медиа нет — просим повторить.
-    Если есть — создаем тикет, сохраняем медиа в media/, логируем,
-    уведомляем операторов, благодарим пользователя.
+    Мы уже создали тикет, теперь просто копим вложения и сообщения
+    до тех пор, пока пользователь не нажмёт 'Отправить оператору ✅'.
+    Никаких 'спасибо', никаких уведомлений оператору тут.
     """
-    # 1. проверяем, что реально есть вложение
-    if not _message_has_media(m):
-        await m.answer(texts.WARRANTY_NEED_MEDIA)
+    data = await state.get_data()
+    ticket_id = data.get("ticket_id")
+    if ticket_id is None:
+        # стейт куда-то потерялся, не плодим новые тикеты
         return
 
-    # 2. достаём то, что он писал на шаге 1
-    data = await state.get_data()
-
-    # 3. создаём/берём юзера и тикет в статусе WAITING
-    ticket_id, user = _upsert_user_and_create_ticket(m)
-
-    # 4. вытаскиваем file_id из присланного сообщения
-    file_id = None
-    if getattr(m, "photo", None):
-        file_id = m.photo[-1].file_id          # самое большое фото
-    elif getattr(m, "document", None):
-        file_id = m.document.file_id
-    elif getattr(m, "video", None):
-        file_id = m.video.file_id
-    elif getattr(m, "voice", None):
-        file_id = m.voice.file_id
-    elif getattr(m, "audio", None):
-        file_id = m.audio.file_id
-    elif getattr(m, "animation", None):
-        file_id = m.animation.file_id
-    elif getattr(m, "video_note", None):
-        file_id = m.video_note.file_id
-
-    # 5. если есть file_id, скачиваем файл в media/ticket_<id>/
-    if file_id:
-        ts = int(time.time())
-        base_dir = Path("media") / f"ticket_{ticket_id}"
-        base_dir.mkdir(parents=True, exist_ok=True)
-
-        local_path = base_dir / f"{ts}_{m.message_id}"
-        # сохраняем файл локально
-        await download_by_file_id(m.bot, file_id, str(local_path))
-
-        # сейчас мы путь к файлу в БД не пишем, потому что у TicketMessage нет поля file_path.
-        # если захочешь хранить путь в базе — добавим колонку и будем писать.
-
-    # 6. пишем в базу оба сообщения:
-    #    - первое сообщение (текстовая жалоба с шага 1),
-    #    - второе сообщение (медиа с этого шага)
-    with SessionLocal() as s:
-        # первое сообщение (описание проблемы)
-        tm1 = TicketMessage(
-            ticket_id=ticket_id,
-            sender_tg_id=m.from_user.id,  # type: ignore
-            sender_type="user",
-            tg_message_id=data["first_msg_id"],
-            content_type=data["first_msg_content_type"],
-            message_text=data["first_msg_text"],
-            caption=data["first_msg_caption"],
-        )
-        s.add(tm1)
-
-        # второе сообщение (медиа и/или подпись к нему)
-        _save_ticket_message(s, ticket_id, m, sender_type="user")
-
-        s.commit()
-
-    # 7. уведомляем операторов (карточка + пересылка оригинальных сообщений)
-    await _notify_operators_about_ticket(
+    # 1. сохраняем вложения этого сообщения на диск
+    await save_all_attachments_from_message(
+        bot=m.bot,
         m=m,
         ticket_id=ticket_id,
-        user=user,
-        intro_text="Новое обращение по гарантии",
-        extra_message_ids=[data["first_msg_id"], m.message_id],
     )
 
-    # 8. отвечаем пользователю + кнопка "В начало"
-    await m.answer(texts.WARRANTY_THANKS, reply_markup=ok_kb())
+    # 2. логируем сообщение целиком в ticket_messages
+    with SessionLocal() as s:
+        _save_ticket_message(s, ticket_id, m, sender_type="user")
+        s.commit()
 
-    # 9. чистим FSM
+    # 3. обновляем список message_id, чтобы потом оператору отправить ВСЁ
+    collected = data.get("collected_msg_ids", [])
+    collected.append(m.message_id)
+    await state.update_data(collected_msg_ids=collected)
+
+    # 4. НИЧЕГО не отвечаем. Пусть пользователь докидывает дальше.
+    # (у него уже есть сообщение с инструкцией и кнопка warranty_media_done_kb())
+
+
+@router.callback_query(F.data == "warranty_done")
+async def warranty_done(c: CallbackQuery, state: FSMContext):
+    """
+    Пользователь нажал 'Отправить оператору ✅' в гарантии.
+    Тут мы:
+    - отправляем одно уведомление операторам со всеми сообщениями
+    - благодарим пользователя
+    - даём кнопку 'В начало'
+    - чистим стейт
+    """
+    data = await state.get_data()
+    ticket_id = data.get("ticket_id")
+    collected_ids = data.get("collected_msg_ids", [])
+    user_tg_id = data.get("user_tg_id")
+
+    if ticket_id is None or user_tg_id is None:
+        await c.answer("Ошибка состояния. Попробуйте заново.", show_alert=True)
+        await state.clear()
+        return
+
+    # достаём юзера из БД, чтобы красиво подписать карточку
+    with SessionLocal() as s:
+        user = s.scalar(select(User).where(User.tg_id == user_tg_id))  # type: ignore
+
+    if user:
+        await _notify_operators_about_ticket(
+            m=c.message,
+            ticket_id=ticket_id,
+            user=user,
+            intro_text="Новое обращение по гарантии",
+            extra_message_ids=collected_ids,
+        )
+
+    # говорим пользователю финальный текст и даём кнопку "В начало"
+    await c.message.answer(texts.WARRANTY_THANKS, reply_markup=ok_kb())
+
+    # убираем состояние
     await state.clear()
 
+    await c.answer("Отправлено оператору")
 
 
 # -------------------------
@@ -326,21 +356,22 @@ async def return_start(c: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "other_start")
 async def other_start(c: CallbackQuery, state: FSMContext):
     """
-    Раздел 'Другой вопрос': показываем два инфо-сообщения,
-    потом клавиатуру: Отправить / Вернуться в меню.
+    Раздел 'Другой вопрос'.
+    Показываем описание, сценарии, потом клавиатуру
+    с кнопкой 'Отправить сообщение сотруднику' / 'В начало'.
     """
     await state.clear()
 
     message = cast(Message, c.message)
-    # редактируем кнопочное сообщение
+
+    # редактируем исходное сообщение на первый текст
     await message.edit_text(texts.OTHER_INTRO_1)
 
-    # второе сообщение
+    # шлём второй текст
     await c.message.answer(texts.OTHER_INTRO_2)
 
-    # третье сообщение с клавиатурой
+    # шлём клавиатуру с кнопками
     await c.message.answer(texts.OTHER_ASK_SEND, reply_markup=other_menu_kb())
-
 
     await c.answer()
 
@@ -348,41 +379,133 @@ async def other_start(c: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "other_send")
 async def other_send(c: CallbackQuery, state: FSMContext):
     """
-    Пользователь нажал "Отправить сообщение сотруднику".
-    Мы просим его написать вопрос следующим сообщением.
+    Пользователь нажал 'Отправить сообщение сотруднику'.
+    Шаг 1: просим описать вопрос словами.
+    Ждём первое содержательное сообщение в состоянии waiting_question_text.
     """
-    await state.set_state(OtherForm.waiting_question)
+    await state.set_state(OtherForm.waiting_question_text)
 
     await c.message.answer(texts.OTHER_PLEASE_DESCRIBE)
     await c.answer()
 
 
-@router.message(OtherForm.waiting_question)
-async def other_waiting_question(m: types.Message, state: FSMContext):
+@router.message(OtherForm.waiting_question_text)
+async def other_question_text(m: types.Message, state: FSMContext):
     """
-    Пользователь прислал вопрос (любой контент).
-    Создаем тикет WAITING, логируем сообщение,
-    отправляем оператору карточку с claim-кнопкой,
-    и говорим пользователю "ваш запрос передан".
+    Это первое сообщение пользователя в 'Другой вопрос'.
+    Здесь:
+    - создаём тикет (если ещё нет)
+    - сохраняем это сообщение
+    - сохраняем вложения с этого сообщения
+    - переходим в режим сбора доп. медиа (waiting_question_media)
+    - показываем инструкцию + кнопку 'Отправить оператору ✅'
     """
-    # создаем тикет
+
+    data = await state.get_data()
+    if data.get("ticket_id") is not None:
+        # гонка: если прилетело сразу несколько сообщений (альбомом)
+        # до переключения состояния, то не создаём новый тикет,
+        # а просто трактуем это сообщение как "доп. медиа"
+        return await other_collect_media(m, state)
+
+    # создаём тикет
     ticket_id, user = _upsert_user_and_create_ticket(m)
 
-    # сохраняем сообщение в ticket_messages
+    # сохраняем вложения с этого сообщения на диск
+    await save_all_attachments_from_message(
+        bot=m.bot,
+        m=m,
+        ticket_id=ticket_id,
+    )
+
+    # логируем это сообщение в ticket_messages
     with SessionLocal() as s:
         _save_ticket_message(s, ticket_id, m, sender_type="user")
         s.commit()
 
-    # уведомляем операторов:
-    await _notify_operators_about_ticket(
-        m=m,
+    # записываем в FSM всё, что надо
+    await state.update_data(
         ticket_id=ticket_id,
-        user=user,
-        intro_text="Новый вопрос от клиента",
-        extra_message_ids=[m.message_id],
+        user_tg_id=m.from_user.id,   # type: ignore
+        collected_msg_ids=[m.message_id],
     )
 
-    # отвечаем пользователю и даем кнопку "В начало"
-    await m.answer(texts.OTHER_AFTER_SEND, reply_markup=ok_kb())
+    # переключаемся в стадию сбора медиа
+    await state.set_state(OtherForm.waiting_question_media)
 
+    # даём инструкцию + кнопку 'Отправить оператору ✅'
+    await m.answer(
+        texts.OTHER_SEND_MEDIA_STEP,
+        reply_markup=other_media_done_kb()
+    )
+
+
+@router.message(OtherForm.waiting_question_media)
+async def other_collect_media(m: types.Message, state: FSMContext):
+    """
+    Пользователь кидает ещё фотки, видео, pdf, голосовые.
+    Мы просто складываем их в тот же тикет и в список сообщений.
+    Ничего не шлём операторам пока не нажмут 'Отправить оператору ✅'.
+    """
+    data = await state.get_data()
+    ticket_id = data.get("ticket_id")
+    if ticket_id is None:
+        return  # защита от сломанного состояния
+
+    # сохраняем вложения из этого сообщения
+    await save_all_attachments_from_message(
+        bot=m.bot,
+        m=m,
+        ticket_id=ticket_id,
+    )
+
+    # логируем сообщение в БД
+    with SessionLocal() as s:
+        _save_ticket_message(s, ticket_id, m, sender_type="user")
+        s.commit()
+
+    # дописываем id сообщения в список collected_msg_ids
+    collected = data.get("collected_msg_ids", [])
+    collected.append(m.message_id)
+    await state.update_data(collected_msg_ids=collected)
+
+    # не отвечаем пользователю заново, не спамим инструкцией второй раз.
+
+
+@router.callback_query(F.data == "other_done")
+async def other_done(c: CallbackQuery, state: FSMContext):
+    """
+    Пользователь нажал 'Отправить оператору ✅' в "Другой вопрос".
+    Тут мы формируем одно уведомление, кидаем всё оператору,
+    благодарим пользователя и чистим состояние.
+    """
+    data = await state.get_data()
+    ticket_id = data.get("ticket_id")
+    collected_ids = data.get("collected_msg_ids", [])
+    user_tg_id = data.get("user_tg_id")
+
+    if ticket_id is None or user_tg_id is None:
+        await c.answer("Ошибка состояния. Попробуйте заново.", show_alert=True)
+        await state.clear()
+        return
+
+    # достаём объект юзера, чтобы красиво подписать карточку
+    with SessionLocal() as s:
+        user = s.scalar(select(User).where(User.tg_id == user_tg_id))  # type: ignore
+
+    if user:
+        await _notify_operators_about_ticket(
+            m=c.message,
+            ticket_id=ticket_id,
+            user=user,
+            intro_text="Новый вопрос от клиента",
+            extra_message_ids=collected_ids,
+        )
+
+    # сообщаем пользователю, что запрос ушёл
+    await c.message.answer(texts.OTHER_AFTER_SEND, reply_markup=ok_kb())
+
+    # чистим FSM
     await state.clear()
+
+    await c.answer("Передано оператору")
