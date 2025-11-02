@@ -52,6 +52,10 @@ class MessageAttachment(Base):
     ticket_message_id: Mapped[int] = mapped_column(
         ForeignKey("ticket_messages.id", ondelete="CASCADE"), index=True
     )
+    ticket_id: Mapped[int | None] = mapped_column(
+        Integer,
+        index=True,
+    )
     media_type: Mapped[str] = mapped_column(String(32))      # photo/document/video/voice/...
     file_id: Mapped[str] = mapped_column(String(256), index=True)
     file_unique_id: Mapped[str | None] = mapped_column(String(128))
