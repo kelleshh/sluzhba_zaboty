@@ -11,6 +11,7 @@ async def _attach_photo(bot, s, ticket_id: int, tm_id: int, m: types.Message):
     ph = m.photo[-1]
     att = MessageAttachment(
         ticket_message_id=tm_id,
+        ticket_id=ticket_id,  
         media_type="photo",
         file_id=ph.file_id,
         file_unique_id=ph.file_unique_id,
@@ -27,6 +28,7 @@ async def _attach_document(bot, s, ticket_id: int, tm_id: int, m: types.Message)
     d = m.document
     att = MessageAttachment(
         ticket_message_id=tm_id,
+        ticket_id=ticket_id,  
         media_type="document",
         file_id=d.file_id,
         file_unique_id=d.file_unique_id,
@@ -43,6 +45,7 @@ async def _attach_video(bot, s, ticket_id: int, tm_id: int, m: types.Message):
     v = m.video
     att = MessageAttachment(
         ticket_message_id=tm_id,
+        ticket_id=ticket_id,  
         media_type="video",
         file_id=v.file_id,
         file_unique_id=v.file_unique_id,
@@ -61,6 +64,7 @@ async def _attach_voice(bot, s, ticket_id: int, tm_id: int, m: types.Message):
     v = m.voice
     att = MessageAttachment(
         ticket_message_id=tm_id,
+        ticket_id=ticket_id,  
         media_type="voice",
         file_id=v.file_id,
         file_unique_id=v.file_unique_id,
