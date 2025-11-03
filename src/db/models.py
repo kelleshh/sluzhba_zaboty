@@ -16,7 +16,6 @@ class User(Base):
     tg_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     first_name: Mapped[str | None] = mapped_column(String(128))
     username: Mapped[str | None] = mapped_column(String(64))
-    phone: Mapped[str | None] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(default=func.now())
 
 class Ticket(Base):

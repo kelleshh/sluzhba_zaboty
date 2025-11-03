@@ -64,7 +64,6 @@ def _upsert_user_and_create_ticket(m: types.Message) -> tuple[int, User]:
                 tg_id=m.from_user.id,              # type: ignore
                 first_name=m.from_user.first_name, # type: ignore
                 username=m.from_user.username,     # type: ignore
-                phone=None,
             )
             s.add(user)
             s.flush()
