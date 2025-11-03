@@ -1,78 +1,11 @@
 from aiogram import Router, types, F
-from aiogram.filters import BaseFilter
-from sqlalchemy import select
-
 from src.db.base import SessionLocal
-from src.db.models import (
-    Ticket,
-    TicketStatus,
-    TicketMessage,
-    User,
-    MessageAttachment,
-)
+from src.db.models import Ticket, TicketStatus, TicketMessage, User, MessageAttachment
 from src.utils.files import download_by_file_id, build_rel_path
+from sqlalchemy import select
 from src.config import settings
 
 router = Router()
-
-
-# =========================
-# ФИЛЬТРЫ
-# =========================
-
-class IsClientWithAssignedTicket(BaseFilter):
-    """Сообщение от КЛИЕНТА, у которого есть активный (ASSIGNED) тикет.
-    Специально исключаем случай самотеста: когда отправитель = оператор.
-    Возвращаем найденный тикет в kwargs.
-    """
-    async def __call__(self, m: types.Message) -> dict | bool:
-        if m.chat.type != "private":
-            return False
-
-        with SessionLocal() as s:
-            user = s.scalar(select(User).where(User.tg_id == m.from_user.id))  # type: ignore
-            if not user:
-                return False
-            t = s.scalar(
-                select(Ticket).where(
-                    Ticket.user_id == user.id,
-                    Ticket.status == TicketStatus.assigned,
-                )
-            )
-            if not t:
-                return False
-
-            # В самотесте оператор и клиент один и тот же id.
-            # Не даём этому хэндлеру срабатывать для оператора.
-            if t.operator_tg_id == m.from_user.id:  # type: ignore
-                return False
-
-            return {"ticket": t}
-
-
-class IsOperatorWithAssignedTicket(BaseFilter):
-    """Сообщение от ОПЕРАТОРА, у которого есть активный (ASSIGNED) тикет.
-    Возвращаем найденный тикет в kwargs.
-    """
-    async def __call__(self, m: types.Message) -> dict | bool:
-        if m.chat.type != "private" or (getattr(m.from_user, "is_bot", False)):  # type: ignore
-            return False
-
-        with SessionLocal() as s:
-            t = s.scalar(
-                select(Ticket).where(
-                    Ticket.operator_tg_id == m.from_user.id,  # type: ignore
-                    Ticket.status == TicketStatus.assigned,
-                )
-            )
-            if not t:
-                return False
-            return {"ticket": t}
-
-
-# =========================
-# ПРИКРЕПЫ
-# =========================
 
 async def _attach_photo(bot, s, ticket_id: int, tm_id: int, m: types.Message):
     ph = m.photo[-1]
@@ -91,7 +24,6 @@ async def _attach_photo(bot, s, ticket_id: int, tm_id: int, m: types.Message):
         att.local_path = await download_by_file_id(bot, ph.file_id, rel)
     s.add(att)
 
-
 async def _attach_document(bot, s, ticket_id: int, tm_id: int, m: types.Message):
     d = m.document
     att = MessageAttachment(
@@ -108,7 +40,6 @@ async def _attach_document(bot, s, ticket_id: int, tm_id: int, m: types.Message)
         rel = build_rel_path(ticket_id, tm_id, "document", d.file_unique_id, getattr(d, "mime_type", None))
         att.local_path = await download_by_file_id(bot, d.file_id, rel)
     s.add(att)
-
 
 async def _attach_video(bot, s, ticket_id: int, tm_id: int, m: types.Message):
     v = m.video
@@ -129,7 +60,6 @@ async def _attach_video(bot, s, ticket_id: int, tm_id: int, m: types.Message):
         att.local_path = await download_by_file_id(bot, v.file_id, rel)
     s.add(att)
 
-
 async def _attach_voice(bot, s, ticket_id: int, tm_id: int, m: types.Message):
     v = m.voice
     att = MessageAttachment(
@@ -146,11 +76,6 @@ async def _attach_voice(bot, s, ticket_id: int, tm_id: int, m: types.Message):
         rel = build_rel_path(ticket_id, tm_id, "voice", v.file_unique_id, getattr(v, "mime_type", None))
         att.local_path = await download_by_file_id(bot, v.file_id, rel)
     s.add(att)
-
-
-# =========================
-# ЛОГИРОВАНИЕ СООБЩЕНИЙ
-# =========================
 
 async def _log_message(bot, s, ticket_id: int, m: types.Message, sender_type: str):
     content_type = m.content_type
@@ -175,37 +100,63 @@ async def _log_message(bot, s, ticket_id: int, m: types.Message, sender_type: st
             await _attach_video(bot, s, ticket_id, tm.id, m)
         elif content_type == "voice" and m.voice:
             await _attach_voice(bot, s, ticket_id, tm.id, m)
-        # при желании добавить: audio / animation / video_note / sticker
+        # при необходимости добавь audio / animation / video_note / sticker
     except Exception:
-        # не валим диалог из-за проблем со скачиванием
+        # не роняем поток, если скачивание сломалось
         pass
 
     s.commit()
 
+@router.message(F.chat.type == "private")
+async def proxy_private(m: types.Message):
+    # игнорим ботов на входе
+    if m.from_user.is_bot:  # type: ignore
+        return
 
-# =========================
-# ПРОКСИ ХЭНДЛЕРЫ
-# =========================
-
-@router.message(F.chat.type == "private", IsClientWithAssignedTicket())
-async def user_to_operator(m: types.Message, ticket: Ticket):
-    """Клиент пишет боту. Копируем оператору и логируем как sender_type='user'."""
-    await m.bot.copy_message(
-        chat_id=ticket.operator_tg_id,
-        from_chat_id=m.chat.id,
-        message_id=m.message_id,  # type: ignore
-    )
     with SessionLocal() as s:
-        await _log_message(m.bot, s, ticket.id, m, sender_type="user")  # type: ignore
+        #
+        # 1) Оператор → Пользователь
+        #
+        t = s.scalar(
+            select(Ticket).where(
+                Ticket.operator_tg_id == m.from_user.id,    # type: ignore
+                Ticket.status == TicketStatus.assigned,
+            )
+        )
+        if t:
+            # дублим пользователю
+            await m.bot.copy_message(
+                chat_id=t.user.tg_id,
+                from_chat_id=m.chat.id,
+                message_id=m.message_id
+            )  # type: ignore
 
+            # логируем как operator
+            await _log_message(m.bot, s, t.id, m, sender_type="operator")  # type: ignore
+            return
 
-@router.message(F.chat.type == "private", IsOperatorWithAssignedTicket())
-async def operator_to_user(m: types.Message, ticket: Ticket):
-    """Оператор пишет боту. Копируем пользователю и логируем как sender_type='operator'."""
-    await m.bot.copy_message(
-        chat_id=ticket.user.tg_id,
-        from_chat_id=m.chat.id,
-        message_id=m.message_id,  # type: ignore
-    )
-    with SessionLocal() as s:
-        await _log_message(m.bot, s, ticket.id, m, sender_type="operator")  # type: ignore
+        #
+        # 2) Пользователь → Оператор
+        #
+        user = s.scalar(select(User).where(User.tg_id == m.from_user.id))  # type: ignore
+        if not user:
+            return
+
+        t = s.scalar(
+            select(Ticket).where(
+                Ticket.user_id == user.id,
+                Ticket.status == TicketStatus.assigned,
+            )
+        )
+        if not t:
+            return
+
+        # дублим оператору
+        await m.bot.copy_message(
+            chat_id=t.operator_tg_id,
+            from_chat_id=m.chat.id,
+            message_id=m.message_id
+        )  # type: ignore
+
+        # логируем как user
+        await _log_message(m.bot, s, t.id, m, sender_type="user")  # type: ignore
