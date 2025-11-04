@@ -54,7 +54,7 @@ async def claim_ticket(c: CallbackQuery):
 
     # сразу дублируем историю заявки в ЛС оператора
     if user_msgs:
-        await c.bot.send_message(operator_id, f"История заявки #{ticket_id}:")  # type: ignore
+        await c.bot.send_message(operator_id, f"Содержание заявки #{ticket_id}:")  # type: ignore
         for tm in user_msgs:
             try:
                 await c.bot.copy_message(
