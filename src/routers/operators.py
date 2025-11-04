@@ -13,6 +13,26 @@ from src.texts import OP_CONNECTED, OP_DISCONNECTED
 
 router = Router()
 
+def _ctype_emoji(ct: str) -> str:
+    return {
+        "text": "📝",
+        "photo": "🖼",
+        "document": "📎",
+        "video": "📹",
+        "voice": "🎙",
+        "audio": "🎵",
+        "animation": "🪄",
+        "video_note": "📮",
+    }.get(ct, "🗂")
+
+def _label_for_sender(sender_type: str, content_type: str, operator_id: int | None) -> str:
+    if sender_type == "user":
+        who = "Пользователь"
+    else:
+        who = f"Оператор {operator_id or '—'}"
+    return f"{_ctype_emoji(content_type)} {who}"
+
+
 
 @router.callback_query(F.data.startswith('claim:'))
 async def claim_ticket(c: CallbackQuery):
@@ -54,17 +74,22 @@ async def claim_ticket(c: CallbackQuery):
 
     # сразу дублируем историю заявки в ЛС оператора
     if user_msgs:
-        await c.bot.send_message(operator_id, f"Содержание заявки #{ticket_id}:")  # type: ignore
+        await c.bot.send_message(operator_id, f"История заявки #{ticket_id}:")  # type: ignore
         for tm in user_msgs:
             try:
+                # метка "кто и что"
+                await c.bot.send_message(
+                    operator_id,
+                    _label_for_sender("user", tm.content_type, operator_id),  # type: ignore
+                )
                 await c.bot.copy_message(
                     chat_id=operator_id,
                     from_chat_id=u.tg_id,        # исходный чат пользователя с ботом
                     message_id=tm.tg_message_id, # его message_id
                 )
             except Exception:
-                # если какое-то старое сообщение не скопировалось — не валимся
                 pass
+
 
     # пользователю: оператор подключился
     await c.bot.send_message(u.tg_id, OP_CONNECTED)  # type: ignore
@@ -118,23 +143,27 @@ async def show_user_history(c: CallbackQuery):
                 .order_by(TicketMessage.created_at.asc(), TicketMessage.id.asc())
             ).all()
 
-        # копируем ИМЕННО ИЗ исходных чатов, чтобы подтянулись и медиа
         for tm in msgs:
             if tm.sender_type == "user":
                 from_chat = user.tg_id
             else:
-                from_chat = t.operator_tg_id  # оператор того тикета
+                from_chat = t.operator_tg_id
                 if not from_chat:
                     continue
             try:
+                # метка перед каждым сообщением
+                await c.bot.send_message(
+                    operator_id,
+                    _label_for_sender(tm.sender_type, tm.content_type, t.operator_tg_id),  # type: ignore
+                )
                 await c.bot.copy_message(
                     chat_id=operator_id,
                     from_chat_id=from_chat,
                     message_id=tm.tg_message_id
                 )  # type: ignore
             except Exception:
-                # старые сообщения могли быть удалены/подчищены — не валимся
                 pass
+
 
         # низ тикета, чисто визуальный разделитель
         await c.bot.send_message(operator_id, f"— Конец истории по тикету #{t.id}")  # type: ignore
