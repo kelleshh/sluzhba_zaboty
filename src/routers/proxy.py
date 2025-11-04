@@ -7,26 +7,6 @@ from src.config import settings
 
 router = Router()
 
-def _ctype_emoji(ct: str) -> str:
-    return {
-        "text": "📝",
-        "photo": "🖼",
-        "document": "📎",
-        "video": "📹",
-        "voice": "🎙",
-        "audio": "🎵",
-        "animation": "🪄",
-        "video_note": "📮",
-    }.get(ct, "🗂")
-
-def _label_for_sender(sender_type: str, content_type: str, operator_id: int | None) -> str:
-    if sender_type == "user":
-        who = "Пользователь"
-    else:
-        who = f"Оператор {operator_id or '—'}"
-    return f"{_ctype_emoji(content_type)} {who}"
-
-
 async def _attach_photo(bot, s, ticket_id: int, tm_id: int, m: types.Message):
     ph = m.photo[-1]
     att = MessageAttachment(
@@ -172,10 +152,6 @@ async def proxy_private(m: types.Message):
             return
 
         # дублим оператору
-        await m.bot.send_message(
-            chat_id=t.operator_tg_id,
-            text=_label_for_sender("user", m.content_type, t.operator_tg_id),  # метка
-        )  # type: ignore
         await m.bot.copy_message(
             chat_id=t.operator_tg_id,
             from_chat_id=m.chat.id,
