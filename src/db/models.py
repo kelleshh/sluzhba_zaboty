@@ -14,9 +14,16 @@ class User(Base):
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(primary_key=True)
     tg_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+
+    # актуальные данные профиля
     first_name: Mapped[str | None] = mapped_column(String(128))
     username: Mapped[str | None] = mapped_column(String(64))
+
+    # служебка
+    is_operator: Mapped[bool] = mapped_column(default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(default=func.now(), onupdate=func.now())
+    last_seen: Mapped[datetime] = mapped_column(default=func.now())
 
 class Ticket(Base):
     __tablename__ = "tickets"
