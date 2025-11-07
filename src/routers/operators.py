@@ -10,6 +10,7 @@ from src.db.models import Ticket, TicketStatus, User, TicketMessage
 from src.keyboards.operator import finish_kb, operator_controls_kb
 from src.keyboards.main import ok_kb
 from src.texts import OP_CONNECTED, OP_DISCONNECTED
+from src.db.users import upsert_user_from_tg
 
 router = Router()
 
@@ -40,6 +41,9 @@ async def claim_ticket(c: CallbackQuery):
     operator_id = c.from_user.id
 
     with SessionLocal() as s:
+        upsert_user_from_tg(s, c.from_user, mark_operator=True)
+        s.commit()
+
         t = s.get(Ticket, ticket_id)
         if not t or t.status != TicketStatus.waiting:
             await c.answer('Уже занято или неактуально', show_alert=True)
@@ -183,6 +187,9 @@ async def finish_ticket(c: CallbackQuery):
     operator_id = c.from_user.id
 
     with SessionLocal() as s:
+        upsert_user_from_tg(s, c.from_user, mark_operator=True)
+        s.commit()
+
         t = s.get(Ticket, ticket_id)
         if not t or t.operator_tg_id != operator_id:
             await c.answer('Это не ваш диалог', show_alert=True)

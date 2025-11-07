@@ -20,6 +20,7 @@ from src.keyboards.main import (
 from src.keyboards.operator import claim_kb
 from src.db.base import SessionLocal
 from src.config import settings
+from src.db.users import upsert_user_from_tg
 from src.db.models import (
     User,
     Ticket,
@@ -53,20 +54,9 @@ class OtherForm(StatesGroup):
 # -------------------------
 
 def _upsert_user_and_create_ticket(m: types.Message) -> tuple[int, User]:
-    """
-    Создает (или обновляет) пользователя, создает тикет WAITING.
-    Возвращает (ticket_id, user_obj).
-    """
     with SessionLocal() as s:
-        user = s.scalar(select(User).where(User.tg_id == m.from_user.id))  # type: ignore
-        if not user:
-            user = User(
-                tg_id=m.from_user.id,              # type: ignore
-                first_name=m.from_user.first_name, # type: ignore
-                username=m.from_user.username,     # type: ignore
-            )
-            s.add(user)
-            s.flush()
+        user = upsert_user_from_tg(s, m.from_user, mark_operator=False)
+        s.flush()
 
         ticket = Ticket(
             user_id=user.id,
