@@ -12,7 +12,6 @@ from src import texts
 from src.keyboards.main import (
     main_menu_kb,
     return_kb,
-    other_menu_kb,
     ok_kb,
     other_media_done_kb,
     warranty_media_done_kb,
