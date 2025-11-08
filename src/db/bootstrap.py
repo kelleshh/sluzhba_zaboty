@@ -21,8 +21,22 @@ CREATE TABLE IF NOT EXISTS message_attachments (
   created_at timestamp default now()
 );
 
+-- ticket_id для message_attachments (совместимость со старой таблицей)
+ALTER TABLE message_attachments
+  ADD COLUMN IF NOT EXISTS ticket_id int;
+CREATE INDEX IF NOT EXISTS ix_message_attachments_ticket_id ON message_attachments(ticket_id);
+
 CREATE INDEX IF NOT EXISTS ix_msg_att_msg ON message_attachments(ticket_message_id);
+
+-- доп. столбцы в users
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS is_operator boolean NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS updated_at timestamp without time zone NOT NULL DEFAULT now(),
+  ADD COLUMN IF NOT EXISTS last_seen  timestamp without time zone NOT NULL DEFAULT now();
+
+CREATE INDEX IF NOT EXISTS ix_users_is_operator ON users(is_operator);
 """
+
 
 def bootstrap_indexes_and_tables() -> None:
     with engine.begin() as conn:

@@ -4,6 +4,7 @@ from src.db.models import Ticket, TicketStatus, TicketMessage, User, MessageAtta
 from src.utils.files import download_by_file_id, build_rel_path
 from sqlalchemy import select
 from src.config import settings
+from src.db.users import upsert_user_from_tg
 
 router = Router()
 
@@ -114,6 +115,9 @@ async def proxy_private(m: types.Message):
         return
 
     with SessionLocal() as s:
+        upsert_user_from_tg(s, m.from_user, mark_operator=False)
+        s.commit()
+
         #
         # 1) Оператор → Пользователь
         #
@@ -124,6 +128,9 @@ async def proxy_private(m: types.Message):
             )
         )
         if t:
+            upsert_user_from_tg(s, m.from_user, mark_operator=True)
+            s.commit()
+            
             # дублим пользователю
             await m.bot.copy_message(
                 chat_id=t.user.tg_id,
