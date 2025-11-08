@@ -445,35 +445,24 @@ async def return_start(c: CallbackQuery, state: FSMContext):
 async def other_start(c: CallbackQuery, state: FSMContext):
     """
     Раздел 'Другой вопрос'.
-    Показываем описание и клавиатуру
-    'Отправить сообщение сотруднику' / 'В начало'.
+
+    Требование:
+    - После нажатия кнопки пользователь СРАЗУ может написать сообщение.
+    - Никаких промежуточных кнопок "Отправить сообщение сотруднику".
+    - Остаётся только кнопка "В начало".
     """
+
     await state.clear()
+    await state.set_state(OtherForm.waiting_question_text)
 
     message = cast(Message, c.message)
 
-    # редактируем исходное сообщение на первый текст
-    await message.edit_text(texts.OTHER_INTRO_1)
+    # Первый текст
+    await message.answer(texts.OTHER_INTRO_1)
 
-    # второй текст
-    await c.message.answer(texts.OTHER_INTRO_2)
+    # Второй текст
+    await c.message.answer(texts.OTHER_INTRO_2, reply_markup=ok_kb())
 
-    # клавиатура
-    await c.message.answer(texts.OTHER_ASK_SEND, reply_markup=other_menu_kb())
-
-    await c.answer()
-
-
-@router.callback_query(F.data == "other_send")
-async def other_send(c: CallbackQuery, state: FSMContext):
-    """
-    Пользователь нажал 'Отправить сообщение сотруднику'.
-    Шаг 1: просим описать вопрос словами.
-    Ждём первое содержательное сообщение в состоянии waiting_question_text.
-    """
-    await state.set_state(OtherForm.waiting_question_text)
-
-    await c.message.answer(texts.OTHER_PLEASE_DESCRIBE)
     await c.answer()
 
 

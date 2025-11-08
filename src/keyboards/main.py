@@ -24,17 +24,6 @@ def return_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Да, перейти в раздел гарантии", callback_data="warranty_start")],
     ])
 
-def other_menu_kb() -> InlineKeyboardMarkup:
-    """
-    Кнопки в разделе 'Другой вопрос'
-    - Отправить сотруднику
-    - Вернуться в меню
-    """
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👉 Отправить сообщение сотруднику", callback_data="other_send")],
-        [InlineKeyboardButton(text="Вернуться в меню", callback_data="to_start")],
-    ])
-
 def ok_kb() -> InlineKeyboardMarkup:
     """
     Кнопка 'В начало' — юзер вернется в главное меню
