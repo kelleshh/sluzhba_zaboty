@@ -14,6 +14,12 @@ from src.db.users import upsert_user_from_tg
 
 router = Router()
 
+def _fmt(dt: datetime | None) -> str:
+    if not dt:
+        return "—"
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
 def _ctype_emoji(ct: str) -> str:
     return {
         "text": "📝",
@@ -32,21 +38,21 @@ def _get_operator_nickname(s, operator_tg_id: int | None) -> str:
     Приоритет: @username > first_name > tg_id.
     """
     if not operator_tg_id:
-        return 'Оператор'
+        return '👮 Оператор'
     
     op = s.scalar(select(User).where(User.tg_id == operator_tg_id))
     if op:
         if op.username:
-            return f"Оператор @{op.username}"
+            return f"👮 Оператор @{op.username}"
         if op.first_name:
-            return f"Оператор {op.first_name}"
-    return f"Оператор {operator_tg_id}"
+            return f"👮 Оператор {op.first_name}"
+    return f"👮 Оператор {operator_tg_id}"
 
 def _label_for_sender(sender_type: str, content_type: str, operator_label: str | None = None) -> str:
     """
     Лейбл перед сообщением в истории:
     - Пользователь:
-    - Оператор @ник:
+    - 👮Оператор @ник:
     """
     if sender_type == "user":
         who = "Пользователь"
@@ -164,7 +170,7 @@ async def show_user_history(c: CallbackQuery):
 
             header = (
                 f"История: тикет #{t.id} | статус {t.status.value} | "
-                f"{t.created_at} → {t.closed_at or '—'} | {operator_label}"
+                f"{_fmt(t.created_at)} → {_fmt(t.closed_at) or '—'} | {operator_label}"
             )
             await c.bot.send_message(operator_id, header)  # type: ignore
 
@@ -174,10 +180,13 @@ async def show_user_history(c: CallbackQuery):
                 .order_by(TicketMessage.created_at.asc(), TicketMessage.id.asc())
             ).all()
 
+            last_sender: str | None = None # "user" / "operator"
+
             for tm in msgs:
                 if tm.sender_type == "user":
                     from_chat = user.tg_id
                     label = _label_for_sender("user", tm.content_type)
+                    sender_key = 'user'
                 else:
                     if not t.operator_tg_id:
                         continue
@@ -187,9 +196,13 @@ async def show_user_history(c: CallbackQuery):
                         tm.content_type,
                         operator_label=operator_label,
                     )
+                    sender_key = 'operator'
 
                 try:
-                    await c.bot.send_message(operator_id, label)
+                    if sender_key != last_sender:
+                        await c.bot.send_message(operator_id, label)
+                        last_sender = sender_key
+
                     await c.bot.copy_message(
                         chat_id=operator_id,
                         from_chat_id=from_chat,
