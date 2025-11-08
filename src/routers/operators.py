@@ -125,22 +125,28 @@ async def show_user_history(c: CallbackQuery):
     ticket_id = int(c.data.split(':')[1])  # type: ignore
     operator_id = c.from_user.id
 
+    # сразу отвечаем, чтобы callback не протух
+    try:
+        await c.answer('Загружаю историю...')
+    except Exception:
+        pass
+
     with SessionLocal() as s:
         curr = s.get(Ticket, ticket_id)
         if not curr:
-            await c.answer('Тикет не найден', show_alert=True)
+            # тут уже лучше send_message, а не повторный answer
+            await c.bot.send_message(operator_id, "Тикет не найден")  # type: ignore
             return
-        # защита: историю показывает только тот, кто реально держит диалог
+
         if curr.operator_tg_id != operator_id:
-            await c.answer('Это не ваш диалог', show_alert=True)
+            await c.bot.send_message(operator_id, "Это не ваш диалог")  # type: ignore
             return
 
         user = s.get(User, curr.user_id)
         if not user:
-            await c.answer('Пользователь не найден', show_alert=True)
+            await c.bot.send_message(operator_id, "Пользователь не найден")  # type: ignore
             return
 
-        # все другие тикеты этого пользователя, КРОМЕ текущего
         other_tickets = s.scalars(
             select(Ticket)
             .where(Ticket.user_id == curr.user_id, Ticket.id != curr.id)
@@ -148,10 +154,10 @@ async def show_user_history(c: CallbackQuery):
         ).all()
 
     if not other_tickets:
-        await c.answer('Других обращений не найдено', show_alert=True)
+        await c.bot.send_message(operator_id, "Других обращений не найдено")  # type: ignore
         return
 
-    # прогоняем по каждому тикету: один тикет → отдельный блок сообщений
+    # один тикет → отдельный блок
     for t in other_tickets:
         with SessionLocal() as s:
             operator_label = _get_operator_nickname(s, t.operator_tg_id)
@@ -169,7 +175,6 @@ async def show_user_history(c: CallbackQuery):
             ).all()
 
             for tm in msgs:
-                # откуда копируем
                 if tm.sender_type == "user":
                     from_chat = user.tg_id
                     label = _label_for_sender("user", tm.content_type)
@@ -195,18 +200,12 @@ async def show_user_history(c: CallbackQuery):
 
             await c.bot.send_message(operator_id, f"— Конец истории по тикету #{t.id}")  # type: ignore
 
-
-
-        # низ тикета, чисто визуальный разделитель
-        await c.bot.send_message(operator_id, f"— Конец истории по тикету #{t.id}")  # type: ignore
-
-    # финальный футер + кнопка "Завершить диалог" (для ТЕКУЩЕГО тикета)
     await c.bot.send_message(
         operator_id,
         "ВЫШЕ ПРИВЕДЕНА ИСТОРИЯ ОБРАЩЕНИЙ ПОЛЬЗОВАТЕЛЯ",
         reply_markup=finish_kb(ticket_id)  # type: ignore
     )
-    await c.answer("История загружена")
+
 
 
 @router.callback_query(F.data.startswith('finish:'))
