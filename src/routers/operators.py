@@ -26,12 +26,33 @@ def _ctype_emoji(ct: str) -> str:
         "video_note": "📮",
     }.get(ct, "🗂")
 
-def _label_for_sender(sender_type: str, content_type: str, operator_id: int | None) -> str:
+def _get_operator_nickname(s, operator_tg_id: int | None) -> str:
+    """
+    Находим имя оператора по tg_id из таблицы users.
+    Приоритет: @username > first_name > tg_id.
+    """
+    if not operator_tg_id:
+        return 'Оператор'
+    
+    op = s.scalar(select(User).where(User.tg_id == operator_tg_id))
+    if op:
+        if op.username:
+            return f"Оператор @{op.username}"
+        if op.first_name:
+            return f"Оператор {op.first_name}"
+    return f"Оператор {operator_tg_id}"
+
+def _label_for_sender(sender_type: str, content_type: str, operator_label: str | None = None) -> str:
+    """
+    Лейбл перед сообщением в истории:
+    - Пользователь:
+    - Оператор @ник:
+    """
     if sender_type == "user":
         who = "Пользователь"
     else:
-        who = f"Оператор {operator_id or '—'}"
-    return f"{_ctype_emoji(content_type)} {who}"
+        who = operator_label or 'Оператор'
+    return f"{_ctype_emoji(content_type)} {who}:"
 
 
 
@@ -132,41 +153,48 @@ async def show_user_history(c: CallbackQuery):
 
     # прогоняем по каждому тикету: один тикет → отдельный блок сообщений
     for t in other_tickets:
-        # шапка тикета
-        header = (
-            f"История: тикет #{t.id} | статус {t.status.value} | "
-            f"{t.created_at} → {t.closed_at or '—'} | оператор: {t.operator_tg_id or '—'}"
-        )
-        await c.bot.send_message(operator_id, header)  # type: ignore
-
-        # сообщения тикета в хронологическом порядке
         with SessionLocal() as s:
+            operator_label = _get_operator_nickname(s, t.operator_tg_id)
+
+            header = (
+                f"История: тикет #{t.id} | статус {t.status.value} | "
+                f"{t.created_at} → {t.closed_at or '—'} | {operator_label}"
+            )
+            await c.bot.send_message(operator_id, header)  # type: ignore
+
             msgs = s.scalars(
                 select(TicketMessage)
                 .where(TicketMessage.ticket_id == t.id)
                 .order_by(TicketMessage.created_at.asc(), TicketMessage.id.asc())
             ).all()
 
-        for tm in msgs:
-            if tm.sender_type == "user":
-                from_chat = user.tg_id
-            else:
-                from_chat = t.operator_tg_id
-                if not from_chat:
-                    continue
-            try:
-                # метка перед каждым сообщением
-                await c.bot.send_message(
-                    operator_id,
-                    _label_for_sender(tm.sender_type, tm.content_type, t.operator_tg_id),  # type: ignore
-                )
-                await c.bot.copy_message(
-                    chat_id=operator_id,
-                    from_chat_id=from_chat,
-                    message_id=tm.tg_message_id
-                )  # type: ignore
-            except Exception:
-                pass
+            for tm in msgs:
+                # откуда копируем
+                if tm.sender_type == "user":
+                    from_chat = user.tg_id
+                    label = _label_for_sender("user", tm.content_type)
+                else:
+                    if not t.operator_tg_id:
+                        continue
+                    from_chat = t.operator_tg_id
+                    label = _label_for_sender(
+                        "operator",
+                        tm.content_type,
+                        operator_label=operator_label,
+                    )
+
+                try:
+                    await c.bot.send_message(operator_id, label)
+                    await c.bot.copy_message(
+                        chat_id=operator_id,
+                        from_chat_id=from_chat,
+                        message_id=tm.tg_message_id,
+                    )
+                except Exception:
+                    pass
+
+            await c.bot.send_message(operator_id, f"— Конец истории по тикету #{t.id}")  # type: ignore
+
 
 
         # низ тикета, чисто визуальный разделитель
